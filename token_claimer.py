@@ -406,6 +406,25 @@ class ClaimEngine:
 
 
 # ---------------------------------------------------------------- 自启 ------
+# ⚠ 写 .vbs 时踩过的四个坑（都在这几个函数里一并解决）：
+#   1. VBScript 里字符串的唯一转义是「把引号双写」，反斜杠没有特殊含义；
+#      用 json.dumps 生成会把 " 变成 \"，被 VBS 解析成「反斜杠 + 字符串结束」→ 语法错误。
+#   2. json.dumps 还会把每个 \ 翻倍成 \\，即使引号侥幸通过，路径也指向不存在的位置。
+#   3. json.dumps 默认 ensure_ascii=True，会把中文目录名（如 12-Token领取助手）
+#      转义成 \u9886\u53d6... 这样的字面量 —— 路径依然找不到。
+#   4. WSH 默认按 ANSI 读取 .vbs，UTF-8 写入的中文路径会乱码。
+#      带 BOM 的 UTF-16LE 是 WSH 明确支持的 Unicode 脚本格式，与系统区域设置无关。
+_VBS_ENCODING = "utf-16"   # Python 的 "utf-16" 会自动写入 BOM
+
+
+def _vbs_literal(s: str) -> str:
+    """把普通字符串变成 VBScript 字符串字面量。
+
+    只做引号双写 —— 不转义反斜杠，也不做 ASCII 转义（见上方第 1~3 条）。
+    """
+    return '"' + s.replace('"', '""') + '"'
+
+
 def autostart_vbs_path() -> Path:
     startup = Path(os.environ.get("APPDATA", "")) / \
         "Microsoft/Windows/Start Menu/Programs/Startup"
@@ -416,21 +435,32 @@ def autostart_enabled() -> bool:
     return autostart_vbs_path().exists()
 
 
+def autostart_target() -> str:
+    """自启要执行的命令行（纯函数，便于测试）。"""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    runner = pyw if pyw.exists() else Path(sys.executable)
+    return f'"{runner}" "{Path(__file__).resolve()}"'
+
+
+def autostart_vbs_text(target: str | None = None) -> str:
+    """自启 .vbs 的完整内容（纯函数，便于测试）。"""
+    t = autostart_target() if target is None else target
+    return (
+        'Set ws = CreateObject("WScript.Shell")\r\n'
+        f'ws.Run {_vbs_literal(t)}, 0, False\r\n'
+    )
+
+
 def set_autostart(enable: bool) -> str:
     vbs = autostart_vbs_path()
     try:
         if enable:
-            if getattr(sys, "frozen", False):
-                target = f'"{sys.executable}"'
-            else:
-                pyw = Path(sys.executable).with_name("pythonw.exe")
-                runner = pyw if pyw.exists() else Path(sys.executable)
-                script = Path(__file__).resolve()
-                target = f'"{runner}" "{script}"'
             vbs.parent.mkdir(parents=True, exist_ok=True)
-            vbs.write_text(
-                'Set ws = CreateObject("WScript.Shell")\n'
-                f'ws.Run {json.dumps(target)}, 0, False\n', "utf-8")
+            # newline="" 防止 Python 把 \n 再翻译一次；文件编码必须让 WSH 能认出 Unicode
+            with open(vbs, "w", encoding=_VBS_ENCODING, newline="") as f:
+                f.write(autostart_vbs_text())
         else:
             vbs.unlink(missing_ok=True)
     except OSError as e:
