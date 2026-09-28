@@ -1,0 +1,15 @@
+# 本地配置与日志（含个人客户端路径，不入库）
+config.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 打包产物
+build/
+dist/
+*.spec
+*.exe
