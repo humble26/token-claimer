@@ -168,8 +168,25 @@ def _safe_props(el):
     return name, ctype, offscreen, rect, enabled
 
 
+def classify(name: str, ctype: int, keywords: list[str],
+             negative: tuple[str, ...]) -> str:
+    """把界面元素分成三类：negative=已完成标识，candidate=可点的候选，skip=无关。
+
+    独立成函数是为了能脱离 COM 环境直接单元测试 —— 判定规则本身才决定
+    「点哪里」，不该只有连上真实界面才能验证。
+
+    负向词用「已签」而非「已签到」，是因为实际界面写的是「今日已签」，
+    不含「到」字，用「已签到」匹配不到（TraeWork CN 就是这样）。
+    """
+    if any(neg in name for neg in negative):
+        return "negative"
+    if ctype in CLICKABLE_TYPES and any(kw in name for kw in keywords):
+        return "candidate"
+    return "skip"
+
+
 def find_and_click(image_name: str, keywords: list[str],
-                   negative: tuple[str, ...] = ("已领", "已签到", "已完成"),
+                   negative: tuple[str, ...] = ("已领", "已签", "已完成"),
                    clicked_names: set[str] | None = None,
                    point_pct: tuple[float, float] | None = None
                    ) -> tuple[str, str]:
@@ -226,13 +243,11 @@ def find_and_click(image_name: str, keywords: list[str],
                 if not name or not enabled or offscreen:
                     continue
                 tree_named += 1
-                if any(neg in name for neg in negative):
+                verdict = classify(name, ctype, keywords, negative)
+                if verdict == "negative":
                     already_seen = True
                     continue
-                if ctype in CLICKABLE_TYPES and \
-                        any(kw in name for kw in keywords):
-                    if name in done_names:
-                        continue
+                if verdict == "candidate" and name not in done_names:
                     if candidate is None:
                         candidate = (el, name)
             if candidate:

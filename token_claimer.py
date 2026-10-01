@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -33,10 +34,11 @@ from tkinter import filedialog, messagebox, ttk
 import uia_click  # 智能点击（可选增强，内部检测 comtypes 是否可用）
 
 APP_TITLE = "Token 领取助手"
-APP_VERSION = "v1.1.0"
+APP_VERSION = "v1.2.0"
 MUTEX_NAME = "TokenClaimer_SingleInstance_ZWB"
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 LOCAL = os.environ.get("LOCALAPPDATA", "")
@@ -68,6 +70,34 @@ DEFAULT_APPS = [
 ]
 
 CLICK_KEYWORDS_DEFAULT = ["领取", "签到", "加油站", "免费"]
+
+# 个别客户端的领取入口名称跟通用关键词对不上，这里按应用预置覆盖。
+# config.json 的 per_app_click 里同名项优先级更高（见 ClaimEngine.per_app_click_cfg）。
+DEFAULT_PER_APP_CLICK = {
+    # TraeWork CN 的领取入口在左下角账户菜单里，行名是「每日领 100 积分」，
+    # 右侧按钮未领取时显示「领取」、已领取时显示「今日已签」。
+    # 只匹配这两者，避开同一菜单里的「立即升级」「管理账户」「免费」等无关控件。
+    # 注意：该入口需要先点开账户菜单才会出现在界面树里，单次点击模型无法完成
+    # 「开菜单 → 点领取」两步，详见 README「已知限制」。
+    "trae_solo": {"keywords": ["每日领", "领取"]},
+}
+
+# 每个应用可以单独选领取日，用来错开频率（例如某个客户端只在周末领）。
+# 集合里的数字对应 datetime.weekday()：周一=0 … 周日=6。
+DAY_PRESETS = {
+    "daily": {0, 1, 2, 3, 4, 5, 6},
+    "weekday": {0, 1, 2, 3, 4},
+    "weekend": {5, 6},
+}
+DAY_ORDER = ("daily", "weekend", "weekday")
+DAY_LABELS = {"daily": "每天", "weekend": "仅周末", "weekday": "仅工作日"}
+DAY_BY_LABEL = {v: k for k, v in DAY_LABELS.items()}
+
+
+def day_matches(app: dict, now: datetime) -> bool:
+    """该应用今天是否在领取日；未配置 days 的旧配置一律按「每天」处理。"""
+    return now.weekday() in DAY_PRESETS.get(app.get("days") or "daily",
+                                            DAY_PRESETS["daily"])
 
 
 def system_dpi_scale() -> float:
@@ -113,7 +143,7 @@ class AppConfig:
         for d in DEFAULT_APPS:
             exe = next((c for c in d["candidates"] if c and Path(c).exists()), "")
             apps.append({"key": d["key"], "label": d["label"],
-                         "exe": exe, "enabled": d["enabled"]})
+                         "exe": exe, "enabled": d["enabled"], "days": "daily"})
         return {
             "apps": apps,
             "mode": "daily",            # daily=每天定时  interval=固定间隔
@@ -153,7 +183,8 @@ class AppConfig:
             exe = saved.get("exe") or next(
                 (c for c in d["candidates"] if c and Path(c).exists()), "")
             merged.append({"key": d["key"], "label": d["label"], "exe": exe,
-                           "enabled": saved.get("enabled", d["enabled"])})
+                           "enabled": saved.get("enabled", d["enabled"]),
+                           "days": saved.get("days") or "daily"})
         data["apps"] = merged
         return data
 
@@ -217,6 +248,20 @@ class ClaimEngine:
             return False
 
     # ---- 调度判断 ----
+    def eligible_apps(self, apps: list[dict], now: datetime) -> list[dict]:
+        """筛掉今天不在领取日的应用，并在日志里说明跳过了谁。
+
+        定时触发与手动「立即领取」都走这里：领取日是用户对"这个客户端
+        什么时候该领"的约束，手动触发也不该绕过它。
+        """
+        ok, skipped = [], []
+        for a in apps:
+            (ok if day_matches(a, now) else skipped).append(a)
+        if skipped:
+            names = "、".join(a["label"] for a in skipped)
+            self.log(f"· 今天不在领取日，跳过：{names}")
+        return ok
+
     def poll_due(self, now: datetime | None = None) -> list[dict]:
         """检查是否有到点的计划；有则标记已触发并返回到点的应用列表（裸字典）。"""
         now = now or datetime.now()
@@ -286,7 +331,8 @@ class ClaimEngine:
         return f"{dt:%m-%d %H:%M}（还有 {h} 小时 {m} 分）" if secs > 0 else "即将执行"
 
     # ---- 执行一次领取 ----
-    def plan_claim(self, due_apps: list[dict] | None = None) -> list[dict]:
+    def plan_claim(self, due_apps: list[dict] | None = None,
+                   now: datetime | None = None) -> list[dict]:
         """返回本次领取计划 [{app, will_launch}]；仅做判断不启动。
 
         due_apps=None 表示"全部启用的应用"（手动/命令行触发）；
@@ -294,6 +340,7 @@ class ClaimEngine:
         已在运行的应用也纳入计划（will_launch=False）：智能点击仍会到
         它的界面里找领取按钮，但不会重复启动、也不会替用户关闭它。
         """
+        now = now or datetime.now()
         if due_apps is None:
             apps = [a for a in self.cfg.data["apps"] if a["enabled"]]
         else:  # 同一秒可能命中多个时间点，按 key 去重
@@ -302,6 +349,8 @@ class ClaimEngine:
                 if a["key"] not in seen:
                     seen.add(a["key"])
                     apps.append(a)
+        # 领取日过滤放在这里，定时与手动两条路径就都覆盖到了
+        apps = self.eligible_apps(apps, now)
         plan = []
         for a in apps:
             if not a["exe"] or not Path(a["exe"]).exists():
@@ -318,9 +367,20 @@ class ClaimEngine:
     def smart_click_active(self) -> bool:
         return bool(self.cfg.data["click_enabled"]) and uia_click.available()
 
+    def per_app_click_cfg(self, app: dict) -> dict:
+        """该应用的点击配置：预置值打底，config.json 里的同名项覆盖。
+
+        预置值走代码而不是写进 _defaults()，是为了让老配置（已经生成过
+        config.json、per_app_click 为空）也能自动拿到，不必删配置重来。
+        """
+        key = app.get("key", "")
+        merged = dict(DEFAULT_PER_APP_CLICK.get(key, {}))
+        merged.update(self.cfg.data.get("per_app_click", {}).get(key, {}))
+        return merged
+
     def launch_extra_args(self, app: dict) -> list[str]:
         """启动参数：per_app 覆盖，或智能点击开启时带无障碍参数。"""
-        ov = self.cfg.data.get("per_app_click", {}).get(app.get("key", ""), {})
+        ov = self.per_app_click_cfg(app)
         if "launch_args" in ov:
             return list(ov["launch_args"])
         if self.smart_click_active():
@@ -328,20 +388,23 @@ class ClaimEngine:
         return []
 
     def click_settings_for(self, app: dict) -> tuple[list[str], tuple | None]:
-        ov = self.cfg.data.get("per_app_click", {}).get(app.get("key", ""), {})
+        ov = self.per_app_click_cfg(app)
         keywords = ov.get("keywords") or list(self.cfg.data["click_keywords"])
         point = tuple(ov["point"]) if ov.get("point") else None
         return keywords, point
 
     def do_launch(self, app: dict) -> bool:
-        extra = self.launch_extra_args(app)
+        # 必须兜住所有异常：本函数在 Tkinter 的 after 回调里执行，而程序以
+        # pythonw（无控制台）运行时，未捕获的异常会被静默丢弃 —— 表现为
+        # 「点了立即领取，日志却停在那里，客户端一个都没起来」。
         try:
+            extra = self.launch_extra_args(app)
             self.launch(app["exe"], tuple(extra))
             suffix = f"，参数 {' '.join(extra)}" if extra else ""
             self.log(f"✔ 已启动 {app['label']}（{app['exe']}）{suffix}")
             return True
-        except OSError as e:
-            self.log(f"⚠ 启动 {app['label']} 失败: {e}", "warn")
+        except Exception as e:
+            self.log(f"⚠ 启动 {app['label']} 失败: {e!r}", "warn")
             return False
 
     # ---- 智能点击任务 ----
@@ -493,6 +556,9 @@ class App:
         self.engine = ClaimEngine(self.cfg, log=self.log)
         self.close_queue: list[list] = []   # [触发时间戳, 镜像名, 阶段0/1]
         self.click_jobs: list[dict] = []    # 智能点击任务
+        # pythonw 无控制台，Tk 回调里未捕获的异常默认被直接丢弃；接管后
+        # 至少会落到日志里，不至于「点了没反应，又查无痕迹」。
+        self.root.report_callback_exception = self._on_tk_error
         self._build_ui()
         # 自动保存基线：构建完界面后记录当前快照
         self.collect_settings()
@@ -613,6 +679,7 @@ class App:
         # ① 应用
         apps_body = self._card(body, "应用（勾选后到点自动启动）", **pad_top)
         self.app_vars, self.status_labels, self.exe_entries = [], [], []
+        self.day_vars, self.day_boxes = [], []
         for a in self.cfg.data["apps"]:
             row = tk.Frame(apps_body, bg=self.C_CARD)
             row.pack(fill="x", pady=3)
@@ -627,9 +694,25 @@ class App:
             self.exe_entries.append(entry)
             self._btn(row, "浏览…", lambda i=len(self.exe_entries) - 1:
                       self.pick_exe(i), small=True).pack(side="left")
+            # 领取日：同一套定时计划下，各应用可错开频率（如仅周末领）
+            day_var = tk.StringVar(
+                value=DAY_LABELS.get(a.get("days") or "daily", DAY_LABELS["daily"]))
+            self.day_vars.append(day_var)
+            box = ttk.Combobox(row, textvariable=day_var, width=7,
+                               state="readonly", font=self.f_body,
+                               values=[DAY_LABELS[k] for k in DAY_ORDER])
+            box.pack(side="left", padx=(8, 0))
+            box.bind("<<ComboboxSelected>>",
+                     lambda e: self.save_settings(quiet=True))
+            self.day_boxes.append(box)
             self.status_labels.append(
                 self._pill(row, "…", self.C_SUB, self.C_GRAY_SOFT))
             self.status_labels[-1].pack(side="left", padx=(10, 0))
+        tk.Label(apps_body, fg=self.C_SUB, bg=self.C_CARD, justify="left",
+                 font=self.f_small, text=(
+                     "路径框右侧的下拉框是「领取日」：到点时只在选定的日子启动该应用，"
+                     "用来错开频率（例如只在周末领的客户端选「仅周末」）。")).pack(
+            anchor="w", pady=(6, 0))
 
         # ② 定时计划
         sched_body = self._card(body, "定时计划", **pad_top)
@@ -870,6 +953,7 @@ class App:
         for i, a in enumerate(apps):
             a["exe"] = self.exe_entries[i].get().strip()
             a["enabled"] = bool(self.app_vars[i].get())
+            a["days"] = DAY_BY_LABEL.get(self.day_vars[i].get(), "daily")
         d = self.cfg.data
         d["mode"] = self.mode_var.get()
         d["daily_times"] = sorted(set(self.time_list.get(0, "end")))
@@ -1013,6 +1097,19 @@ class App:
             self.root.destroy()
 
     # ---------- 日志 ----------
+    def _on_tk_error(self, exc_type, exc_value, tb):
+        """接管 Tkinter 回调异常：界面上一行摘要，完整堆栈追加到当日日志。"""
+        self.log(f"⚠ 内部错误：{exc_type.__name__}: {exc_value}", "warn")
+        try:
+            log_dir = config_dir() / "logs"
+            log_dir.mkdir(exist_ok=True)
+            detail = "".join(traceback.format_exception(exc_type, exc_value, tb))
+            with open(log_dir / f"{datetime.now():%Y%m%d}.log", "a",
+                      encoding="utf-8") as f:
+                f.write(detail + "\n")
+        except OSError:
+            pass
+
     def log(self, msg: str, tag: str = "info"):
         line = f"[{datetime.now():%H:%M:%S}] {msg}"
         try:
