@@ -1,6 +1,7 @@
 # 本地配置与日志（含个人客户端路径，不入库）
 config.json
 *.log
+logs/
 
 # Python
 __pycache__/
