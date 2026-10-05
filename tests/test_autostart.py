@@ -146,14 +146,22 @@ class TestSetAutostartRoundTrip(unittest.TestCase):
         self.assertFalse(self.vbs.exists())
 
     def test_written_file_is_utf16_bom_and_decodes_correctly(self):
-        tc.set_autostart(True)
+        # 自带含中文的目标样本：不能依赖「本仓库路径恰好含中文」——
+        # CI 上仓库在 D:\a\… 这类全英文路径下，原写法会误报（首次 CI 运行已发生）。
+        fake = r'"C:\Python\pythonw.exe" "D:\测试目录\12-Token领取助手\token_claimer.py"'
+        orig = tc.autostart_target
+        tc.autostart_target = lambda: fake
+        try:
+            tc.set_autostart(True)
+        finally:
+            tc.autostart_target = orig
         raw = self.vbs.read_bytes()
         # 坑 4：必须是 WSH 能识别的 Unicode 编码
         self.assertTrue(raw.startswith(b"\xff\xfe"),
                         "缺少 UTF-16LE BOM —— WSH 会按 ANSI 读，中文路径乱码")
         text = raw.decode("utf-16")
         self.assertIn("领取助手", text, "写入后中文仍应可读")
-        self.assertEqual(extract_run_target(text), tc.autostart_target())
+        self.assertEqual(extract_run_target(text), fake)
 
     def test_round_trip_preserves_exact_target(self):
         tc.set_autostart(True)
