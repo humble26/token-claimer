@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>滑块验证码 · 本地演示</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: linear-gradient(160deg, #e8edf4, #f6f8fb);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  .panel { width: 358px; background: #fff; border-radius: 12px; padding: 24px;
+           box-shadow: 0 8px 30px rgba(30, 50, 90, .12); }
+  h1 { font-size: 16px; color: #30364a; margin-bottom: 14px; font-weight: 600; }
+  .captcha-box { position: relative; width: 310px; height: 155px; border-radius: 8px;
+                 overflow: hidden; background: #dde3ea; }
+  .captcha-box canvas { position: absolute; left: 0; top: 0; }
+  #pieceCanvas { will-change: transform; }
+  .track { position: relative; width: 310px; height: 40px; margin-top: 14px;
+           background: #f0f2f6; border-radius: 20px; }
+  .fill { position: absolute; left: 0; top: 0; height: 100%; width: 0;
+          background: #dce9ff; border-radius: 20px 0 0 20px; }
+  .tip { position: absolute; inset: 0; text-align: center; line-height: 40px;
+         font-size: 13px; color: #9aa3b2; user-select: none; }
+  .btn { position: absolute; left: 0; top: 0; width: 40px; height: 40px; border-radius: 50%;
+         background: #fff; box-shadow: 0 2px 8px rgba(30, 50, 90, .28); cursor: grab;
+         display: flex; align-items: center; justify-content: center;
+         color: #4a6bdf; font-size: 18px; user-select: none; touch-action: none; }
+  .btn:active { cursor: grabbing; }
+  #status { margin-top: 12px; font-size: 13px; min-height: 18px; color: #9aa3b2; }
+  #status.ok { color: #1a9e55; } #status.bad { color: #d4453c; }
+  #attempts { margin-top: 4px; font-size: 12px; color: #b6bdc9; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>滑块验证码（本地演示）</h1>
+    <div class="captcha-box">
+      <canvas id="bgCanvas" width="310" height="155"></canvas>
+      <canvas id="pieceCanvas" width="62" height="52"></canvas>
+    </div>
+    <div class="track" id="track">
+      <div class="fill"></div>
+      <div class="tip">按住滑块，拖动完成拼图</div>
+      <div class="btn" id="btn">&raquo;</div>
+    </div>
+    <div id="status">等待操作…</div>
+    <div id="attempts">尝试次数：0</div>
+  </div>
+
+<script>
+'use strict';
+const W = 310, H = 155, P = 52, R = 10, TOL = 4;
+
+const bgC = document.getElementById('bgCanvas');
+const pieceC = document.getElementById('pieceCanvas');
+const bctx = bgC.getContext('2d');
+const pctx = pieceC.getContext('2d');
+const trackEl = document.getElementById('track');
+const fillEl = trackEl.querySelector('.fill');
+const btn = document.getElementById('btn');
+const statusEl = document.getElementById('status');
+const attemptsEl = document.getElementById('attempts');
+
+let gapX = 0, gapY = 0, dragX = 0, dragging = false, startX = 0, attempts = 0;
+
+// 拼图外形：方形主体 + 顶部凹口 + 右侧凸起，包围盒 (P+R)×P
+function piecePath(ctx, x, y) {
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + P * 0.3, y);
+  ctx.arc(x + P * 0.5, y, P * 0.19, Math.PI, 0, true);            // 顶部凹口
+  ctx.lineTo(x + P, y);
+  ctx.arc(x + P, y + P / 2, R, -Math.PI / 2, Math.PI / 2, false); // 右侧凸起
+  ctx.lineTo(x + P, y + P);
+  ctx.lineTo(x, y + P);
+  ctx.closePath();
+}
+
+function newChallenge() {
+  window.captchaSolved = false;
+  window.captchaLastError = null;
+
+  // 随机纹理背景，给边缘检测提供素材
+  const hue = Math.random() * 360;
+  bctx.fillStyle = `hsl(${hue}, 42%, 64%)`;
+  bctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 240; i++) {
+    bctx.fillStyle = `hsla(${Math.random() * 360}, ${30 + Math.random() * 40}%, ${25 + Math.random() * 55}%, ${0.18 + Math.random() * 0.4})`;
+    bctx.beginPath();
+    bctx.arc(Math.random() * W, Math.random() * H, 1 + Math.random() * 9, 0, 7);
+    bctx.fill();
+  }
+  for (let i = 0; i < 8; i++) {
+    bctx.strokeStyle = `hsla(${Math.random() * 360}, 55%, 32%, .5)`;
+    bctx.lineWidth = 1 + Math.random() * 2;
+    bctx.beginPath();
+    bctx.moveTo(Math.random() * W, Math.random() * H);
+    bctx.lineTo(Math.random() * W, Math.random() * H);
+    bctx.stroke();
+  }
+
+  // 无缺口副本，用于抠出明亮的拼图块
+  const flat = document.createElement('canvas');
+  flat.width = W; flat.height = H;
+  flat.getContext('2d').drawImage(bgC, 0, 0);
+
+  gapX = 100 + Math.floor(Math.random() * (W - 100 - P - R - 10));
+  gapY = 15 + Math.floor(Math.random() * (H - P - 30));
+
+  bctx.save();
+  piecePath(bctx, gapX, gapY);
+  bctx.fillStyle = 'rgba(0,0,0,.45)';
+  bctx.fill();
+  bctx.strokeStyle = 'rgba(255,255,255,.9)';
+  bctx.lineWidth = 2;
+  bctx.stroke();
+  bctx.restore();
+
+  pctx.clearRect(0, 0, pieceC.width, pieceC.height);
+  pctx.save();
+  piecePath(pctx, 0, 0);
+  pctx.clip();
+  pctx.drawImage(flat, -gapX, -gapY);
+  pctx.restore();
+
+  dragX = 0;
+  setPos(0);
+  statusEl.textContent = '等待操作…';
+  statusEl.className = '';
+  window.captchaSeq = (window.captchaSeq || 0) + 1;   // 题目版本号，供自动化事件驱动同步
+}
+
+function setPos(x) {
+  dragX = x;
+  fillEl.style.width = Math.max(0, Math.min(x, W - P)) + 'px';
+  btn.style.left = x + 'px';
+  pieceC.style.left = x + 'px';
+  pieceC.style.top = gapY + 'px';
+}
+
+btn.addEventListener('pointerdown', (e) => {
+  if (window.captchaSolved) return;
+  dragging = true;
+  startX = e.clientX - dragX;
+  btn.setPointerCapture(e.pointerId);
+});
+btn.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const max = trackEl.clientWidth - btn.offsetWidth;
+  setPos(Math.max(0, Math.min(e.clientX - startX, max)));
+});
+function release() {
+  if (!dragging) return;
+  dragging = false;
+  attempts++;
+  attemptsEl.textContent = `尝试次数：${attempts}`;
+  const err = dragX - gapX;
+  window.captchaLastError = err;
+  if (Math.abs(err) <= TOL) {
+    window.captchaSolved = true;
+    setPos(gapX);
+    statusEl.textContent = `验证成功（误差 ${err}px）`;
+    statusEl.className = 'ok';
+  } else {
+    statusEl.textContent = `验证失败（偏差 ${err}px），已换新题`;
+    statusEl.className = 'bad';
+    setTimeout(newChallenge, 700);
+  }
+}
+btn.addEventListener('pointerup', release);
+btn.addEventListener('pointercancel', release);
+
+newChallenge();
+</script>
+</body>
+</html>
