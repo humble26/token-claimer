@@ -135,6 +135,45 @@ class PlanClaimDayFilterTest(unittest.TestCase):
         self.assertEqual([p["app"]["key"] for p in plan], ["zcode", "workbuddy"])
 
 
+class NextRunTextTest(unittest.TestCase):
+    r"""状态栏「下次执行」文案必须容错。
+
+    本函数由 status_tick 每秒调用一次；一旦抛异常，after 链条断裂，状态栏和
+    「下次执行」从此不再刷新，而界面看不出任何异样。原缺陷用 t[:2]/t[-2:] 切片
+    解析时间，而 TIME_RE 允许 "8:05" 这种单位数小时，切片得到 int("8:") 直接
+    ValueError。
+    """
+
+    def _eng(self, **over):
+        data = {"mode": "daily", "daily_times": ["08:00"], "fired_log": {},
+                "interval_minutes": 720}
+        data.update(over)
+        return tc.ClaimEngine(_StubCfg(**data))
+
+    def test_single_digit_hour_does_not_crash(self):
+        txt = self._eng(daily_times=["8:05"]).next_run_text(
+            now=datetime(2026, 10, 3, 12, 0))
+        self.assertIn("08:05", txt)
+
+    def test_upcoming_time_today_is_reported(self):
+        txt = self._eng(daily_times=["20:00"]).next_run_text(
+            now=datetime(2026, 10, 3, 12, 0))
+        self.assertIn("10-03 20:00", txt)
+
+    def test_all_times_passed_rolls_to_tomorrow(self):
+        txt = self._eng(daily_times=["08:00"]).next_run_text(
+            now=datetime(2026, 10, 3, 12, 0))
+        self.assertIn("10-04 08:00", txt)
+
+    def test_no_times_reports_unset(self):
+        self.assertEqual(self._eng(daily_times=[]).next_run_text(), "未设置时间")
+
+    def test_broken_interval_timestamp_does_not_crash(self):
+        txt = self._eng(mode="interval",
+                        fired_log={"interval-last": "坏值"}).next_run_text()
+        self.assertIn("就绪", txt)
+
+
 class ConfigPersistenceTest(unittest.TestCase):
     """AppConfig：领取日必须能存下来、读回来。"""
 
@@ -177,6 +216,30 @@ class ConfigPersistenceTest(unittest.TestCase):
         again = tc.AppConfig()
         zcode = next(a for a in again.data["apps"] if a["key"] == "zcode")
         self.assertEqual(zcode["days"], "weekend")
+
+    def test_broken_structural_fields_fall_back(self):
+        """config.json 被手改坏（null / 字符串）也不能让程序起不来。"""
+        self._write({"fired_log": None, "daily_times": None,
+                     "per_app_click": "oops", "apps": "oops"})
+        cfg = tc.AppConfig()
+        self.assertEqual(cfg.data["fired_log"], {})
+        self.assertEqual(cfg.data["daily_times"], ["08:00", "12:00", "20:00"])
+        self.assertEqual(cfg.data["per_app_click"], {})
+        self.assertEqual([a["key"] for a in cfg.data["apps"]],
+                         [d["key"] for d in tc.DEFAULT_APPS])
+
+    def test_broken_numeric_fields_fall_back(self):
+        """一个 "abc" 就能让 poll_due 每轮抛异常、调度循环整体停摆。"""
+        self._write({"interval_minutes": "abc", "keep_minutes": None,
+                     "click_max_attempts": "很多"})
+        cfg = tc.AppConfig()
+        self.assertEqual(cfg.data["interval_minutes"], 720)
+        self.assertEqual(cfg.data["keep_minutes"], 10)
+        self.assertEqual(cfg.data["click_max_attempts"], 10)
+
+    def test_negative_numeric_field_is_clamped(self):
+        self._write({"interval_minutes": -5})
+        self.assertEqual(tc.AppConfig().data["interval_minutes"], 1)
 
 
 class LabelMapTest(unittest.TestCase):
