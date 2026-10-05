@@ -1,0 +1,6 @@
+# Token 领取助手 · 可选依赖（装了才有对应增强功能，全不装也能基本使用）
+# 智能点击（Windows UI Automation 经 comtypes）
+comtypes
+
+# 自动过滑块（滑块求解库；numpy/opencv 由它声明）
+geo-captcha @ git+https://github.com/humble26/geo-captcha.git@v2.2.0

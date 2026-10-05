@@ -11,6 +11,8 @@
 
 ```bat
 pip install comtypes      :: 可选，启用智能点击
+pip install "geo-captcha @ git+https://github.com/humble26/geo-captcha.git@v2.2.0"
+                          :: 可选，启用自动过滑块（滑块求解库，自带 numpy/opencv 依赖）
 启动.bat                   :: 或 python token_claimer.py
 ```
 
@@ -239,11 +241,11 @@ python token_claimer.py --inspect <镜像名> :: 枚举某客户端界面元素�
 
 ## 打包成独立 EXE
 
-双击 `打包exe.bat`，产物在 `dist\Token领取助手.exe`（单文件、无窗口，含智能点击与滑块验证码模块）。脚本会自动装 `numpy` + `opencv-python`（自动过滑块用），产物因此比纯 comtypes 版大一些（约几十 MB）；若不需要该功能，可自行从脚本的 pip 安装行里去掉这两个包——运行时 `captcha_solver.available()` 会返回假，自动过滑块自动停用并退回人工。
+双击 `打包exe.bat`，产物在 `dist\Token领取助手.exe`（单文件、无窗口，含智能点击与滑块验证码模块）。脚本会自动装 `geo-captcha`（滑块求解库，自带 numpy/opencv），产物因此比纯 comtypes 版大一些（约几十 MB）；若不需要该功能，可自行从脚本的 pip 安装行里去掉 `geo-captcha`——运行时 `captcha_solver.available()` 会返回假，自动过滑块自动停用并退回人工。
 
 ## 说明
 
 - 若未安装 comtypes，智能点击自动停用，工具退回"启动客户端 + 保持 + 关闭"的基础模式（基础模式对启动即领取的客户端已足够）。
-- 若未安装 numpy/opencv，自动过滑块停用（其余功能不受影响），ZCode 退回半自动：工具点开入口，人工拖滑块。
+- 若未安装 geo-captcha（或其依赖 numpy/opencv），自动过滑块停用（其余功能不受影响），ZCode 退回半自动：工具点开入口，人工拖滑块。
 - 本工具只自动点击"领取/签到"类按钮，不会触碰界面上的其他元素；所有点击都记录在日志里。
 - 建议开启开机自启并配合"错过补领"，电脑休眠错过的时间点也能补上。
